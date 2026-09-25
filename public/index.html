@@ -46,6 +46,25 @@
         <summary>原始响应 JSON</summary>
         <pre id="result-json"></pre>
       </details>
+      <div class="submit-row evidence-create-row">
+        <button id="btn-create-evidence" class="primary" type="button">创建复测证据单</button>
+        <span id="evidence-create-hint" class="hint">以本次裁决的完整草稿在服务端重新裁决并冻结结论，供人工复核。</span>
+      </div>
+    </section>
+
+    <section class="panel hidden" id="evidence-panel">
+      <div class="panel-title">
+        <h2>③ 复测证据单</h2>
+        <span id="evidence-status" class="badge"></span>
+      </div>
+      <div id="evidence-summary" class="evidence-summary"></div>
+      <div id="evidence-progress" class="evidence-progress"></div>
+      <div id="evidence-alert" class="evidence-alert hidden" role="alert"></div>
+      <div id="evidence-links"></div>
+      <div class="submit-row">
+        <span id="evidence-message" class="hint"></span>
+        <button id="btn-evidence-retry" class="small hidden" type="button">按原操作号重试</button>
+      </div>
     </section>
   </main>
 

@@ -101,6 +101,73 @@ export async function runSmoke(base) {
     check('未知接口', false, String(err));
   }
 
+  // 7. 复测证据单：创建 → 冻结 → 复核 → 幂等 → 否决转需重裁决
+  try {
+    const draft = {
+      tolerance: 1,
+      fields: [
+        { name: 'F1', offset: { x: 0, y: 0 }, particles: [{ id: 'A1', x: 0, y: 0, category: 'PE' }, { id: 'A2', x: 2, y: 0, category: 'PE' }] },
+        { name: 'F2', offset: { x: 0, y: 0 }, particles: [{ id: 'B1', x: 1, y: 0, category: 'PE' }, { id: 'B2', x: 0, y: 1, category: 'PE' }] },
+        { name: 'F3', offset: { x: 100, y: 100 }, particles: [{ id: 'C1', x: 0, y: 0, category: 'PP' }] },
+      ],
+    };
+    const createRes = await fetch(`${base}/api/review-evidence-sheets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draft),
+    });
+    const sheet = await createRes.json();
+    check('创建证据单 → 201 且冻结来源与结论', createRes.status === 201
+      && sheet.status === 'pending'
+      && sheet.result && sheet.result.totalParticles === 3
+      && sheet.source && typeof sheet.source.hash === 'string'
+      && Array.isArray(sheet.links) && sheet.links.length === 2, `HTTP ${createRes.status}`);
+    const sid = sheet.id;
+    const linkOk = sheet.links.every((l) => l.a && l.b && l.category
+      && l.dx === Math.abs(l.a.filterX - l.b.filterX)
+      && l.dy === Math.abs(l.a.filterY - l.b.filterY));
+    check('每条采用关联列出两端观测、类别与坐标差', linkOk);
+
+    const review = (payload) => fetch(`${base}/api/review-evidence-sheets/${sid}/reviews`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    const staleRes = await review({ version: 99, operationId: 'smoke-stale', decisions: [{ linkId: 1, decision: 'confirm' }] });
+    check('过期版本 → 409 且证据单不变', staleRes.status === 409, `HTTP ${staleRes.status}`);
+
+    const okRes = await review({ version: 0, operationId: 'smoke-op-1', decisions: [{ linkId: 1, decision: 'confirm' }] });
+    const okBody = await okRes.json();
+    check('确认关联 #1 → 200 且版本推进', okRes.status === 200 && okBody.version === 1 && okBody.progress.confirmed === 1, `HTTP ${okRes.status}`);
+
+    const replayRes = await review({ version: 0, operationId: 'smoke-op-1', decisions: [{ linkId: 1, decision: 'confirm' }] });
+    const replayBody = await replayRes.json();
+    check('同操作号同内容重试 → 返回原结果', replayRes.status === 200 && replayBody.idempotentReplay === true && replayBody.version === 1, `HTTP ${replayRes.status}`);
+
+    const conflictRes = await review({ version: 1, operationId: 'smoke-op-1', decisions: [{ linkId: 2, decision: 'reject' }] });
+    check('同操作号不同内容 → 409 且证据单不变', conflictRes.status === 409, `HTTP ${conflictRes.status}`);
+
+    const rejectRes = await review({ version: 1, operationId: 'smoke-op-2', decisions: [{ linkId: 2, decision: 'reject' }] });
+    const rejectBody = await rejectRes.json();
+    check('否决关联 #2 → 立即转为需重裁决并记录首条否决关联', rejectRes.status === 200
+      && rejectBody.status === 'needs_readjudication'
+      && rejectBody.firstRejectedLinkId === 2, `HTTP ${rejectRes.status}`);
+
+    const closedRes = await review({ version: 2, operationId: 'smoke-op-3', decisions: [{ linkId: 2, decision: 'confirm' }] });
+    check('终态后提交 → 409', closedRes.status === 409, `HTTP ${closedRes.status}`);
+
+    const getRes = await fetch(`${base}/api/review-evidence-sheets/${sid}`);
+    const got = await getRes.json();
+    check('按编号获取证据单 → 冻结内容保持', getRes.status === 200 && got.version === 2 && got.result.totalParticles === 3, `HTTP ${getRes.status}`);
+
+    const listRes = await fetch(`${base}/api/review-evidence-sheets`);
+    const list = await listRes.json();
+    check('证据单列表包含该单', listRes.status === 200 && list.sheets.some((s) => s.id === sid), `HTTP ${listRes.status}`);
+  } catch (err) {
+    check('复测证据单冒烟', false, String(err));
+  }
+
   return results;
 }
 

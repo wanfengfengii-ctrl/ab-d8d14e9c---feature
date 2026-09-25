@@ -11,3 +11,6 @@ __pycache__/
 .nox/
 .pnpm-store/
 *.py[cod]
+
+# 证据单本地数据目录（DATA_DIR 默认值）
+data/

@@ -11,9 +11,13 @@ services:
     image: microplastic-dedup:local
     environment:
       PORT: 8080
+      DATA_DIR: /app/data
     ports:
       # 宿主机端口可通过环境变量 APP_PORT 配置（默认 8080）
       - "${APP_PORT:-8080}:8080"
+    volumes:
+      # 复测证据单持久化：容器重启 / 重建后按编号恢复
+      - evidence-data:/app/data
     restart: unless-stopped
 
   verify:
@@ -22,3 +26,6 @@ services:
     # 一次性服务：自动执行构建检查、单元测试与 API 冒烟验收，以退出码结束
     command: ["node", "scripts/verify.js"]
     restart: "no"
+
+volumes:
+  evidence-data:

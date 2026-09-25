@@ -44,6 +44,23 @@
   var resultParticles = document.getElementById('result-particles');
   var resultJson = document.getElementById('result-json');
   var submitHint = document.getElementById('submit-hint');
+  var createEvidenceBtn = document.getElementById('btn-create-evidence');
+  var evidenceCreateHint = document.getElementById('evidence-create-hint');
+  var evidencePanel = document.getElementById('evidence-panel');
+  var evidenceStatus = document.getElementById('evidence-status');
+  var evidenceSummary = document.getElementById('evidence-summary');
+  var evidenceProgress = document.getElementById('evidence-progress');
+  var evidenceAlert = document.getElementById('evidence-alert');
+  var evidenceLinks = document.getElementById('evidence-links');
+  var evidenceMessage = document.getElementById('evidence-message');
+  var evidenceRetryBtn = document.getElementById('btn-evidence-retry');
+
+  // 最近一次成功裁决所提交的完整草稿（证据单以其为准重新裁决并冻结）
+  var lastAdjudicatedPayload = null;
+  // 当前打开的证据单与进行中的复核提交（网络失败时按原操作号重试）
+  var currentSheet = null;
+  var pendingReview = null;
+  var reviewInFlight = false;
 
   function esc(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
@@ -279,6 +296,8 @@
           return;
         }
         submitHint.textContent = '裁决完成。';
+        lastAdjudicatedPayload = payload;
+        evidenceCreateHint.textContent = '以本次裁决的完整草稿在服务端重新裁决并冻结结论，供人工复核。';
         renderResult(r.body);
       })
       .catch(function () {
@@ -286,6 +305,205 @@
         submitHint.textContent = '';
       });
   });
+
+  // ── 复测证据单 ────────────────────────────────────────────────
+
+  var STATUS_TEXT = { pending: '复核中', verified: '已证实', needs_readjudication: '需重裁决' };
+
+  function newOperationId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+    return 'op-' + Date.now() + '-' + Math.random().toString(36).slice(2, 12);
+  }
+
+  function fmtTime(iso) {
+    try { return new Date(iso).toLocaleString(); } catch (e) { return iso; }
+  }
+
+  function obsText(o) {
+    return esc(o.fieldName) + ' · ' + esc(o.particleId) +
+      '<br><span class="muted">局部 (' + o.localX + ', ' + o.localY + ') → 滤膜 (' + o.filterX + ', ' + o.filterY + ')</span>';
+  }
+
+  function renderEvidence(sheet) {
+    currentSheet = sheet;
+    evidencePanel.classList.remove('hidden');
+
+    evidenceStatus.textContent = STATUS_TEXT[sheet.status] || sheet.status;
+    evidenceStatus.className = 'badge status-' + sheet.status;
+
+    var src = sheet.source;
+    evidenceSummary.innerHTML =
+      '<div><strong>证据单 #' + sheet.id + '</strong>（版本 v' + sheet.version + '，创建于 ' + esc(fmtTime(sheet.createdAt)) + '）</div>' +
+      '<div class="muted">冻结来源：容差 ' + src.tolerance + '，' + src.fieldCount + ' 个视野（' +
+      src.fields.map(function (f) { return esc(f.name) + ' ' + f.particleCount + ' 颗'; }).join('、') + '），共 ' +
+      src.observationCount + ' 个观测；来源摘要哈希 <code>' + esc(src.hash.slice(0, 16)) + '…</code></div>' +
+      '<div class="muted">冻结结论：最终颗粒 ' + sheet.result.totalParticles + ' 个，采用关联 ' + sheet.result.linkCount +
+      ' 条。证据单按创建时刻的完整草稿冻结，当前草稿的后续修改不会改写本证据。</div>';
+
+    var p = sheet.progress;
+    var pct = p.total === 0 ? 100 : Math.round(((p.confirmed + p.rejected) / p.total) * 100);
+    evidenceProgress.innerHTML =
+      '<div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%"></div></div>' +
+      '<div class="muted">进度：已确认 ' + p.confirmed + ' / 共 ' + p.total + ' 条关联；已否决 ' + p.rejected +
+      ' 条；剩余待复核 ' + p.remaining + ' 条。</div>';
+
+    if (sheet.firstRejectedLinkId !== null) {
+      var rl = sheet.links.filter(function (l) { return l.linkId === sheet.firstRejectedLinkId; })[0];
+      evidenceAlert.innerHTML = rl
+        ? '⚠ 首条否决关联：#' + rl.linkId + '（' + esc(rl.a.particleId) + ' ↔ ' + esc(rl.b.particleId) +
+          '，类别 ' + esc(rl.category) + '，坐标差 Δx=' + rl.dx + '、Δy=' + rl.dy + '）—— 正是这条显微关联阻止本次颗粒计数被证实，请修正草稿后重新裁决并创建新证据单。'
+        : '⚠ 存在否决关联，本次计数未获证实。';
+      evidenceAlert.classList.remove('hidden');
+    } else if (sheet.status === 'verified') {
+      evidenceAlert.innerHTML = '✓ 全部采用关联均获确认，本次颗粒计数已证实。';
+      evidenceAlert.classList.remove('hidden');
+    } else {
+      evidenceAlert.classList.add('hidden');
+      evidenceAlert.innerHTML = '';
+    }
+
+    var closed = sheet.status !== 'pending';
+    evidenceLinks.innerHTML = sheet.links.length === 0
+      ? '<p class="muted">本次裁决未采用任何关联（零关联），无需逐条复核。</p>'
+      : '<table class="evidence-table"><thead><tr>' +
+        '<th>关联</th><th>所属颗粒</th><th>类别</th><th>端点 A</th><th>端点 B</th><th>坐标差</th><th>复核结论</th>' +
+        '</tr></thead><tbody>' +
+        sheet.links.map(function (l) {
+          var decisionCell;
+          if (l.decision === 'confirmed') {
+            decisionCell = '<span class="badge decided-confirm">已确认</span>';
+          } else if (l.decision === 'rejected') {
+            decisionCell = '<span class="badge decided-reject">已否决</span>';
+          } else if (closed) {
+            decisionCell = '<span class="muted">待复核（证据单已终结）</span>';
+          } else {
+            decisionCell =
+              '<button type="button" class="small" data-evidence-action="confirm" data-link="' + l.linkId + '"' + (reviewInFlight ? ' disabled' : '') + '>确认</button> ' +
+              '<button type="button" class="small danger" data-evidence-action="reject" data-link="' + l.linkId + '"' + (reviewInFlight ? ' disabled' : '') + '>否决</button>';
+          }
+          return '<tr>' +
+            '<td>#' + l.linkId + '</td>' +
+            '<td>颗粒 #' + l.particleId + '</td>' +
+            '<td>' + esc(l.category) + '</td>' +
+            '<td>' + obsText(l.a) + '</td>' +
+            '<td>' + obsText(l.b) + '</td>' +
+            '<td>Δx=' + l.dx + '<br>Δy=' + l.dy + '<br><span class="muted">曼哈顿 ' + l.manhattan + '</span></td>' +
+            '<td>' + decisionCell + '</td>' +
+            '</tr>';
+        }).join('') + '</tbody></table>';
+  }
+
+  function setEvidenceMessage(text, isError) {
+    evidenceMessage.textContent = text || '';
+    evidenceMessage.classList.toggle('error-text', !!isError);
+  }
+
+  function refreshEvidence() {
+    if (!currentSheet) return;
+    fetch('/api/review-evidence-sheets/' + currentSheet.id)
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (sheet) { if (sheet) renderEvidence(sheet); })
+      .catch(function () { /* 轮询失败静默，下次再试 */ });
+  }
+
+  function submitReview(payload) {
+    if (!currentSheet || reviewInFlight) return;
+    reviewInFlight = true;
+    renderEvidence(currentSheet);
+    setEvidenceMessage('提交复核中…（操作号 ' + payload.operationId + '）');
+    fetch('/api/review-evidence-sheets/' + currentSheet.id + '/reviews', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+      .then(function (res) {
+        return res.json().then(function (body) { return { res: res, body: body }; });
+      })
+      .then(function (r) {
+        reviewInFlight = false;
+        if (r.res.ok) {
+          pendingReview = null;
+          evidenceRetryBtn.classList.add('hidden');
+          setEvidenceMessage(r.body.idempotentReplay ? '该操作号已提交过，返回原结果（幂等重放）。' : '复核已记录。');
+          renderEvidence(r.body);
+          return;
+        }
+        var err = (r.body && r.body.error) || {};
+        setEvidenceMessage(err.message || ('提交被拒绝（HTTP ' + r.res.status + '）'), true);
+        refreshEvidence(); // 版本过期等情形：刷新到最新状态
+      })
+      .catch(function () {
+        reviewInFlight = false;
+        pendingReview = payload; // 保留同一操作号，重试不产生重复判定
+        evidenceRetryBtn.classList.remove('hidden');
+        setEvidenceMessage('网络或服务器错误，可按原操作号重试（不会重复判定）。', true);
+        renderEvidence(currentSheet);
+      });
+  }
+
+  evidenceRetryBtn.addEventListener('click', function () {
+    if (pendingReview) submitReview(pendingReview);
+  });
+
+  // 复核按钮（事件委托）
+  evidenceLinks.addEventListener('click', function (e) {
+    var btn = e.target.closest('button[data-evidence-action]');
+    if (!btn || !currentSheet) return;
+    submitReview({
+      version: currentSheet.version,
+      operationId: newOperationId(),
+      decisions: [{ linkId: Number(btn.dataset.link), decision: btn.dataset.evidenceAction }],
+    });
+  });
+
+  // 创建证据单：以本次裁决的完整草稿在服务端重新裁决并冻结
+  createEvidenceBtn.addEventListener('click', function () {
+    if (!lastAdjudicatedPayload) return;
+    createEvidenceBtn.disabled = true;
+    evidenceCreateHint.textContent = '正在创建证据单…';
+    fetch('/api/review-evidence-sheets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(lastAdjudicatedPayload),
+    })
+      .then(function (res) {
+        return res.json().then(function (body) { return { res: res, body: body }; });
+      })
+      .then(function (r) {
+        createEvidenceBtn.disabled = false;
+        if (!r.res.ok) {
+          var err = (r.body && r.body.error) || {};
+          evidenceCreateHint.textContent = err.message || ('创建失败（HTTP ' + r.res.status + '）');
+          return;
+        }
+        evidenceCreateHint.textContent = '已创建证据单 #' + r.body.id + '（冻结版本 v' + r.body.version + '）。';
+        pendingReview = null;
+        evidenceRetryBtn.classList.add('hidden');
+        setEvidenceMessage('');
+        renderEvidence(r.body);
+        evidencePanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      })
+      .catch(function () {
+        createEvidenceBtn.disabled = false;
+        evidenceCreateHint.textContent = '网络或服务器错误，创建失败，请重试。';
+      });
+  });
+
+  // 页面加载时恢复最近一份证据单；复核中每 5 秒刷新进度（持续显示冻结来源 / 剩余项 / 进度 / 首条否决关联）
+  fetch('/api/review-evidence-sheets')
+    .then(function (res) { return res.ok ? res.json() : null; })
+    .then(function (body) {
+      if (!body || !Array.isArray(body.sheets) || body.sheets.length === 0) return null;
+      var latest = body.sheets[body.sheets.length - 1];
+      return fetch('/api/review-evidence-sheets/' + latest.id);
+    })
+    .then(function (res) { return res && res.ok ? res.json() : null; })
+    .then(function (sheet) { if (sheet) renderEvidence(sheet); })
+    .catch(function () { /* 首次访问无证据单或服务暂不可用 */ });
+
+  setInterval(function () {
+    if (currentSheet && currentSheet.status === 'pending' && !reviewInFlight) refreshEvidence();
+  }, 5000);
 
   render();
 })();

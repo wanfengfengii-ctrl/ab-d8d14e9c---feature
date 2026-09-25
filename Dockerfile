@@ -11,6 +11,10 @@ COPY public ./public
 COPY scripts ./scripts
 COPY test ./test
 
+# 证据单持久化目录（命名卷挂载点，归 node 用户所有）
+ENV DATA_DIR=/app/data
+RUN mkdir -p /app/data && chown node:node /app/data
+
 USER node
 EXPOSE 8080
 
