@@ -11,6 +11,9 @@ COPY public ./public
 COPY scripts ./scripts
 COPY test ./test
 
+# 证据单数据目录（容器内默认 /app/data，可被 DATA_DIR 覆盖）；授权给非 root 运行用户
+RUN mkdir -p /app/data && chown node:node /app/data
+
 USER node
 EXPOSE 8080
 

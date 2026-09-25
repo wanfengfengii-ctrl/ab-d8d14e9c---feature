@@ -3,13 +3,15 @@
 /**
  * 一次性验收服务（docker compose 中的 verify）：
  *   1. 构建检查：对全部源码执行 node --check（本项目无编译期，语法检查即构建验证）；
- *   2. 单元测试：node --test 运行求解器 / 校验 / API 测试；
- *   3. API 冒烟验收：启动真实服务并执行 scripts/smoke.js 的验收项。
+ *   2. 单元测试：node --test 运行求解器 / 校验 / API / 证据单测试；
+ *   3. API 冒烟验收：启动真实服务并执行 scripts/smoke.js 的验收项（含证据单业务 API）；
+ *   4. 证据单重启恢复验收：同一数据目录重启服务后按编号恢复证据单与幂等台账。
  * 全部通过以退出码 0 结束，否则以退出码 1 结束。
  */
 
 import { spawnSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { readdirSync, mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from '../src/server.js';
@@ -22,6 +24,19 @@ function record(name, ok, detail) {
   steps.push({ name, ok });
   console.log(`${ok ? '✓' : '✗'} ${name}${detail ? ` — ${detail}` : ''}`);
 }
+
+async function listen(server) {
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return `http://127.0.0.1:${server.address().port}`;
+}
+function close(server) {
+  return new Promise((resolve) => server.close(resolve));
+}
+const postJson = (url, body) => fetch(url, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+});
 
 function listJsFiles(dir) {
   const abs = path.join(ROOT, dir);
@@ -63,9 +78,9 @@ function listJsFiles(dir) {
 
 // ── 步骤 3：API 冒烟验收 ─────────────────────────────────────────
 {
-  const server = createServer();
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
+  const smokeDataDir = mkdtempSync(path.join(os.tmpdir(), 'dedup-smoke-data-'));
+  const server = createServer({ dataDir: smokeDataDir });
+  const base = await listen(server);
   console.log(`  冒烟验收目标: ${base}（verify 内部启动的真实服务）`);
   let ok = true;
   try {
@@ -78,9 +93,70 @@ function listJsFiles(dir) {
     ok = false;
     console.log(`  ✗ 冒烟验收异常: ${err && err.stack ? err.stack : err}`);
   } finally {
-    await new Promise((resolve) => server.close(resolve));
+    await close(server);
+    rmSync(smokeDataDir, { recursive: true, force: true });
   }
   record('API 冒烟验收', ok);
+}
+
+// ── 步骤 4：证据单重启恢复验收 ────────────────────────────────────
+{
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'dedup-restart-data-'));
+  const details = [];
+  let ok = true;
+  const expect = (cond, label) => {
+    if (!cond) { ok = false; details.push(`未通过：${label}`); }
+  };
+  try {
+    const draft = {
+      tolerance: 1,
+      fields: [
+        { name: 'F1', offset: { x: 0, y: 0 }, particles: [{ id: 'A1', x: 0, y: 0, category: 'PE' }, { id: 'A2', x: 2, y: 0, category: 'PE' }] },
+        { name: 'F2', offset: { x: 0, y: 0 }, particles: [{ id: 'B1', x: 1, y: 0, category: 'PE' }, { id: 'B2', x: 0, y: 1, category: 'PE' }] },
+        { name: 'F3', offset: { x: 100, y: 100 }, particles: [{ id: 'C1', x: 0, y: 0, category: 'PP' }] },
+      ],
+    };
+
+    // 第一次启动：创建证据单并提交一条复核结论
+    let server = createServer({ dataDir });
+    let base = await listen(server);
+    const ticket = await (await postJson(`${base}/api/review-tickets`, draft)).json();
+    const reviewPayload = {
+      version: ticket.version,
+      operationId: 'verify-restart-op',
+      decisions: [{ linkIndex: 0, decision: 'confirmed' }, { linkIndex: 1, decision: 'rejected' }],
+    };
+    const reviewed = await (await postJson(`${base}/api/review-tickets/${ticket.id}/reviews`, reviewPayload)).json();
+    expect(reviewed.status === 'needs-readjudication' && reviewed.version === 1, '重启前复核已应用');
+    await close(server);
+
+    // 第二次启动（同一数据目录）：按编号恢复
+    server = createServer({ dataDir });
+    base = await listen(server);
+    const restoredRes = await fetch(`${base}/api/review-tickets/${ticket.id}`);
+    const restored = await restoredRes.json();
+    expect(restoredRes.status === 200, '重启后按编号 GET 证据单 → 200');
+    expect(restored.version === 1 && restored.status === 'needs-readjudication', '重启后版本与状态恢复');
+    expect(restored.links[0].decision === 'confirmed' && restored.links[1].decision === 'rejected', '重启后逐条复核结论恢复');
+    expect(restored.firstRejectedLinkIndex === 1, '重启后首条否决关联恢复');
+    expect(restored.result.totalParticles === 3 && restored.source.observationCount === 5, '重启后冻结结论与来源摘要不变');
+    const list = await (await fetch(`${base}/api/review-tickets`)).json();
+    expect(list.tickets.some((x) => x.id === ticket.id), '重启后列表包含该证据单');
+    // 幂等台账同样恢复：同操作号同内容返回原结果
+    const replay = await postJson(`${base}/api/review-tickets/${ticket.id}/reviews`, reviewPayload);
+    const replayBody = await replay.json();
+    expect(replay.status === 200 && replayBody.version === 1, '重启后同操作号同内容重试返回原结果');
+    // 编号不回退
+    const next = await (await postJson(`${base}/api/review-tickets`, draft)).json();
+    expect(next.id > ticket.id, '重启后证据单编号单调递增');
+    await close(server);
+  } catch (err) {
+    ok = false;
+    details.push(String(err && err.stack ? err.stack : err));
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+  record('证据单重启恢复验收', ok, details.join('；'));
 }
 
 const allOk = steps.every((s) => s.ok);

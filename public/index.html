@@ -41,11 +41,39 @@
     <section class="panel hidden" id="result-panel">
       <h2>② 裁决结果</h2>
       <div id="result-summary" class="result-summary"></div>
+      <div class="ticket-create-row">
+        <button id="btn-create-ticket" type="button" class="primary">创建复测证据单</button>
+        <span class="hint">以本次裁决的完整草稿在服务端重新裁决并冻结；此后修改上方草稿不会改写证据单。</span>
+        <span id="ticket-create-hint" class="hint"></span>
+      </div>
       <div id="result-particles"></div>
       <details class="raw-json">
         <summary>原始响应 JSON</summary>
         <pre id="result-json"></pre>
       </details>
+    </section>
+
+    <section class="panel" id="ticket-panel">
+      <div class="panel-title">
+        <h2>③ 复测证据单</h2>
+        <div class="actions">
+          <button id="btn-refresh-tickets" type="button">刷新列表</button>
+        </div>
+      </div>
+      <p class="hint">证据单在创建时冻结裁决结论与来源草稿，服务重启后按编号恢复；逐条确认或否决采用关联，全部确认方可证实，任一否决即需重裁决。</p>
+      <div id="ticket-list" class="ticket-list"></div>
+
+      <div id="ticket-detail" class="hidden">
+        <div id="ticket-head" class="ticket-head"></div>
+        <div id="ticket-source" class="ticket-source"></div>
+        <div id="ticket-progress" class="ticket-progress"></div>
+        <div id="ticket-first-rejected" class="first-rejected hidden" role="alert"></div>
+        <div id="ticket-links"></div>
+        <div class="submit-row">
+          <button id="btn-submit-review" class="primary" type="button">提交复核结论</button>
+          <span id="review-hint" class="hint"></span>
+        </div>
+      </div>
     </section>
   </main>
 

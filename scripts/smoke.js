@@ -101,6 +101,87 @@ export async function runSmoke(base) {
     check('未知接口', false, String(err));
   }
 
+  // 7. 复测证据单业务冒烟：创建 → 冻结 → 复核 → 幂等/冲突
+  try {
+    const postTicket = (body) => fetch(`${base}/api/review-tickets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const draft = {
+      tolerance: 1,
+      fields: [
+        { name: 'F1', offset: { x: 0, y: 0 }, particles: [{ id: 'A1', x: 0, y: 0, category: 'PE' }, { id: 'A2', x: 2, y: 0, category: 'PE' }] },
+        { name: 'F2', offset: { x: 0, y: 0 }, particles: [{ id: 'B1', x: 1, y: 0, category: 'PE' }, { id: 'B2', x: 0, y: 1, category: 'PE' }] },
+        { name: 'F3', offset: { x: 100, y: 100 }, particles: [{ id: 'C1', x: 0, y: 0, category: 'PP' }] },
+      ],
+    };
+    const suffix = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+
+    // 创建：服务端重新裁决并冻结
+    const createRes = await postTicket(draft);
+    const ticket = await createRes.json();
+    check('POST /api/review-tickets → 201 且冻结裁决结论', createRes.status === 201 && ticket.result && ticket.result.totalParticles === 3, `HTTP ${createRes.status}`);
+    check('证据单列出每条采用关联的两端观测、类别与坐标差',
+      Array.isArray(ticket.links) && ticket.links.length === 2
+        && ticket.links.every((l) => l.a && l.b && l.category && Number.isInteger(l.dx) && Number.isInteger(l.dy) && l.decision === 'pending'),
+      `links=${ticket.links && ticket.links.length}`);
+    check('来源摘要含容差 / 视野数 / 观测数 / 草稿指纹',
+      ticket.source && ticket.source.tolerance === 1 && ticket.source.fieldCount === 3 && ticket.source.observationCount === 5 && typeof ticket.source.draftHash === 'string');
+
+    // 按编号查询与列表
+    const getRes = await fetch(`${base}/api/review-tickets/${ticket.id}`);
+    check('GET /api/review-tickets/:id → 200 按编号取回', getRes.status === 200, `HTTP ${getRes.status}`);
+    const listRes = await fetch(`${base}/api/review-tickets`);
+    const list = await listRes.json();
+    check('GET /api/review-tickets 列表包含新证据单', listRes.status === 200 && list.tickets.some((x) => x.id === ticket.id));
+
+    // 复核：全部确认 → 已证实
+    const confirmAll = {
+      version: ticket.version,
+      operationId: `smoke-confirm-${suffix}`,
+      decisions: ticket.links.map((l) => ({ linkIndex: l.index, decision: 'confirmed' })),
+    };
+    const reviewUrl = `${base}/api/review-tickets/${ticket.id}/reviews`;
+    const postReview = (body) => fetch(reviewUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const confirmRes = await postReview(confirmAll);
+    const confirmed = await confirmRes.json();
+    check('全部确认 → 已证实（版本前进）', confirmRes.status === 200 && confirmed.status === 'verified' && confirmed.version === ticket.version + 1 && confirmed.progress.remaining === 0, `HTTP ${confirmRes.status} status=${confirmed.status}`);
+
+    // 同内容重试 → 返回原结果
+    const replayRes = await postReview(confirmAll);
+    const replay = await replayRes.json();
+    check('同操作号同内容重试 → 200 返回原结果', replayRes.status === 200 && JSON.stringify(replay) === JSON.stringify(confirmed), `HTTP ${replayRes.status}`);
+
+    // 同操作号不同内容 → 409 且证据单不变
+    const conflictRes = await postReview({ ...confirmAll, version: confirmed.version, decisions: [{ linkIndex: 0, decision: 'rejected' }] });
+    check('同操作号不同内容 → 409', conflictRes.status === 409, `HTTP ${conflictRes.status}`);
+    const afterConflict = await (await fetch(`${base}/api/review-tickets/${ticket.id}`)).json();
+    check('操作号冲突后证据单不变', afterConflict.version === confirmed.version && afterConflict.status === 'verified');
+
+    // 过期版本 → 409
+    const staleRes = await postReview({ version: ticket.version, operationId: `smoke-stale-${suffix}`, decisions: [{ linkIndex: 0, decision: 'rejected' }] });
+    check('过期版本 → 409', staleRes.status === 409 && (await staleRes.json()).error.code === 'VERSION_CONFLICT', `HTTP ${staleRes.status}`);
+
+    // 否决流：任一否决 → 需重裁决，首条否决关联可见
+    const t2 = await (await postTicket(draft)).json();
+    const rejectRes = await fetch(`${base}/api/review-tickets/${t2.id}/reviews`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: t2.version, operationId: `smoke-reject-${suffix}`, decisions: [{ linkIndex: 0, decision: 'rejected' }] }),
+    });
+    const rejected = await rejectRes.json();
+    check('任一否决 → 需重裁决且首条否决关联明确',
+      rejectRes.status === 200 && rejected.status === 'needs-readjudication' && rejected.firstRejectedLinkIndex === 0,
+      `HTTP ${rejectRes.status} status=${rejected.status}`);
+  } catch (err) {
+    check('复测证据单业务冒烟', false, String(err));
+  }
+
   return results;
 }
 

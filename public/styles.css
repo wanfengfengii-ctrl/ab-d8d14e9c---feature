@@ -199,4 +199,123 @@ table.particles td input { min-width: 5rem; }
   font-size: .82rem;
 }
 
+/* ── 复测证据单 ── */
+.ticket-create-row {
+  display: flex;
+  align-items: center;
+  gap: .7rem;
+  flex-wrap: wrap;
+  margin: .2rem 0 1rem;
+  padding: .6rem .8rem;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: #fbfdfe;
+}
+
+.ticket-list { display: grid; gap: .5rem; margin-bottom: 1rem; }
+.ticket-item {
+  display: flex;
+  align-items: center;
+  gap: .9rem;
+  flex-wrap: wrap;
+  text-align: left;
+  padding: .55rem .8rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfdfe;
+}
+.ticket-item:hover { border-color: var(--accent); }
+.ticket-item .tid { font-weight: 700; }
+.ticket-item .rej { color: var(--danger); font-weight: 600; }
+.muted { color: var(--muted); font-size: .86rem; }
+
+.status-badge {
+  border-radius: 999px;
+  padding: .08rem .7rem;
+  font-size: .82rem;
+  font-weight: 700;
+}
+.status-pending { background: #fff4e0; color: #8a5a00; }
+.status-verified { background: #e2f4e8; color: var(--ok); }
+.status-needs-readjudication { background: var(--danger-bg); color: var(--danger); }
+
+.ticket-head {
+  display: flex;
+  align-items: baseline;
+  gap: .9rem;
+  flex-wrap: wrap;
+  margin-bottom: .7rem;
+}
+.ticket-head .tid { font-size: 1.05rem; font-weight: 700; }
+
+.ticket-source {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  padding: .6rem .9rem;
+  margin-bottom: .8rem;
+  background: #fbfdfe;
+}
+.ticket-source h3 { margin: 0 0 .4rem; font-size: .95rem; }
+.source-grid { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-bottom: .4rem; }
+.source-grid code { background: var(--chip); padding: 0 .3rem; border-radius: 4px; }
+.source-fields { display: flex; gap: .4rem; flex-wrap: wrap; }
+.chip {
+  background: var(--chip);
+  border-radius: 6px;
+  padding: .1rem .55rem;
+  font-size: .84rem;
+}
+
+.ticket-progress { margin-bottom: .8rem; }
+.progress-text { margin-bottom: .3rem; }
+.progress-bar {
+  height: .55rem;
+  background: var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--ok));
+  transition: width .25s ease;
+}
+
+.first-rejected {
+  border: 1px solid var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-radius: 8px;
+  padding: .6rem .9rem;
+  margin-bottom: .8rem;
+  font-weight: 600;
+}
+
+.link-table { width: 100%; border-collapse: collapse; margin-bottom: .8rem; }
+.link-table th, .link-table td {
+  text-align: left;
+  padding: .35rem .45rem;
+  border-bottom: 1px solid var(--line);
+  font-size: .9rem;
+  vertical-align: top;
+}
+.link-table th { color: var(--muted); font-weight: 500; }
+.link-row.decision-confirmed { background: #f2faf5; }
+.link-row.decision-rejected { background: var(--danger-bg); }
+
+.decision-cell { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.decision-state { color: var(--muted); font-size: .84rem; }
+.btn-confirm.active {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #fff;
+  font-weight: 700;
+}
+.btn-reject.active {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+  font-weight: 700;
+}
+
 .hidden { display: none !important; }

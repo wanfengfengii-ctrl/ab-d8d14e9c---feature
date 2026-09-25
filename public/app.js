@@ -279,6 +279,8 @@
           return;
         }
         submitHint.textContent = '裁决完成。';
+        lastAdjudicatedPayload = payload; // 冻结“当时完整草稿”，供创建证据单使用
+        ticketCreateHint.textContent = '';
         renderResult(r.body);
       })
       .catch(function () {
@@ -287,5 +289,253 @@
       });
   });
 
+  // ── 复测证据单 ─────────────────────────────────────────────
+  var lastAdjudicatedPayload = null; // 最近一次裁决成功时的完整草稿
+  var openTicketState = null;        // { ticket, decisions: {linkIndex: 'confirmed'|'rejected'} }
+
+  var ticketListEl = document.getElementById('ticket-list');
+  var ticketDetailEl = document.getElementById('ticket-detail');
+  var ticketHeadEl = document.getElementById('ticket-head');
+  var ticketSourceEl = document.getElementById('ticket-source');
+  var ticketProgressEl = document.getElementById('ticket-progress');
+  var ticketFirstRejectedEl = document.getElementById('ticket-first-rejected');
+  var ticketLinksEl = document.getElementById('ticket-links');
+  var ticketCreateHint = document.getElementById('ticket-create-hint');
+  var reviewHint = document.getElementById('review-hint');
+
+  var STATUS_LABEL = { 'pending': '复核中', 'verified': '已证实', 'needs-readjudication': '需重裁决' };
+
+  function fetchJson(path, options) {
+    return fetch(path, options).then(function (res) {
+      return res.json().then(function (body) { return { res: res, body: body }; });
+    });
+  }
+
+  // 操作号由提交内容确定：同内容重试天然携带同一操作号（幂等），内容一变操作号即变
+  function hashStr(s) {
+    var h1 = 5381;
+    var h2 = 52711;
+    for (var i = 0; i < s.length; i++) {
+      h1 = ((h1 * 33) ^ s.charCodeAt(i)) >>> 0;
+      h2 = ((h2 * 31) ^ s.charCodeAt(i)) >>> 0;
+    }
+    return h1.toString(16) + h2.toString(16);
+  }
+  function operationIdFor(ticketId, version, decisions) {
+    var s = decisions.map(function (d) { return d.linkIndex + ':' + d.decision; }).sort().join(',');
+    return 'web-t' + ticketId + '-v' + version + '-' + hashStr(s);
+  }
+
+  function fmtTime(iso) {
+    try { return new Date(iso).toLocaleString(); } catch (e) { return iso; }
+  }
+
+  function statusBadge(status) {
+    return '<span class="status-badge status-' + esc(status) + '">' + esc(STATUS_LABEL[status] || status) + '</span>';
+  }
+
+  function renderTicketList(tickets) {
+    if (!tickets || tickets.length === 0) {
+      ticketListEl.innerHTML = '<p class="hint">暂无证据单。裁决成功后，可在结果旁创建复测证据单。</p>';
+      return;
+    }
+    ticketListEl.innerHTML = tickets.map(function (t) {
+      var p = t.progress;
+      return '<button type="button" class="ticket-item" data-ticket-id="' + t.id + '">' +
+        '<span class="tid">#' + t.id + '</span>' + statusBadge(t.status) +
+        '<span>进度 ' + p.confirmed + '/' + p.total + '，剩余 ' + p.remaining + '</span>' +
+        (t.firstRejectedLinkIndex !== null ? '<span class="rej">首条否决：关联 #' + t.firstRejectedLinkIndex + '</span>' : '') +
+        '<span class="muted">' + esc(fmtTime(t.createdAt)) + '</span>' +
+        '</button>';
+    }).join('');
+  }
+
+  function loadTickets(selectId) {
+    fetchJson('/api/review-tickets')
+      .then(function (r) {
+        if (!r.res.ok) return;
+        renderTicketList(r.body.tickets);
+        if (selectId !== undefined && selectId !== null) openTicket(selectId);
+      })
+      .catch(function () { /* 列表加载失败不影响录入 */ });
+  }
+
+  function syncDecisionsFromTicket() {
+    var decisions = {};
+    openTicketState.ticket.links.forEach(function (l) {
+      if (l.decision !== 'pending') decisions[l.index] = l.decision;
+    });
+    openTicketState.decisions = decisions;
+  }
+
+  function openTicket(id) {
+    fetchJson('/api/review-tickets/' + id)
+      .then(function (r) {
+        if (!r.res.ok) return;
+        openTicketState = { ticket: r.body, decisions: {} };
+        syncDecisionsFromTicket();
+        renderTicketDetail();
+      })
+      .catch(function () { /* 忽略 */ });
+  }
+
+  function obsText(o) {
+    return esc(o.fieldName) + ' / ' + esc(o.particleId) + '（滤膜坐标 ' + o.filterX + ', ' + o.filterY + '）';
+  }
+
+  function renderTicketDetail() {
+    var t = openTicketState.ticket;
+    var p = t.progress;
+    ticketDetailEl.classList.remove('hidden');
+
+    ticketHeadEl.innerHTML =
+      '<span class="tid">证据单 #' + t.id + '</span>' + statusBadge(t.status) +
+      '<span class="muted">版本 v' + t.version + ' · 创建于 ' + esc(fmtTime(t.createdAt)) + ' · 更新于 ' + esc(fmtTime(t.updatedAt)) + '</span>';
+
+    ticketSourceEl.innerHTML =
+      '<h3>冻结来源（创建时的完整草稿，后续修改不会改写本证据单）</h3>' +
+      '<div class="source-grid">' +
+      '<span>容差：<strong>' + t.source.tolerance + '</strong></span>' +
+      '<span>视野数：<strong>' + t.source.fieldCount + '</strong></span>' +
+      '<span>观测数：<strong>' + t.source.observationCount + '</strong></span>' +
+      '<span>最终颗粒：<strong>' + t.result.totalParticles + '</strong></span>' +
+      '<span>采用关联：<strong>' + t.result.linkCount + '</strong></span>' +
+      '<span>草稿指纹：<code>' + esc(t.source.draftHash.slice(0, 12)) + '</code></span>' +
+      '</div>' +
+      '<div class="source-fields">' + t.source.fields.map(function (f) {
+        return '<span class="chip">' + esc(f.name) + '（平移 ' + f.offset.x + ', ' + f.offset.y + '，' + f.particleCount + ' 个观测）</span>';
+      }).join('') + '</div>';
+
+    var pct = p.total === 0 ? 100 : Math.round((p.confirmed / p.total) * 100);
+    ticketProgressEl.innerHTML =
+      '<div class="progress-text">复核进度：共 ' + p.total + ' 条采用关联，已确认 ' + p.confirmed +
+      ' · 已否决 ' + p.rejected + ' · <strong>剩余 ' + p.remaining + '</strong></div>' +
+      '<div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%"></div></div>';
+
+    if (t.firstRejectedLinkIndex !== null) {
+      var fl = t.links[t.firstRejectedLinkIndex];
+      ticketFirstRejectedEl.innerHTML = '首条否决关联：#' + fl.index + '（' + esc(fl.a.particleId) + ' ↔ ' + esc(fl.b.particleId) +
+        '，类别 ' + esc(fl.category) + '，坐标差 Δx=' + fl.dx + '、Δy=' + fl.dy + '）—— 该显微关联阻止本次颗粒计数被证实，需重新裁决。';
+      ticketFirstRejectedEl.classList.remove('hidden');
+    } else {
+      ticketFirstRejectedEl.classList.add('hidden');
+      ticketFirstRejectedEl.innerHTML = '';
+    }
+
+    if (t.links.length === 0) {
+      ticketLinksEl.innerHTML = '<p class="hint">本次裁决无采用关联（全部颗粒独立），无需逐条复核。</p>';
+    } else {
+      ticketLinksEl.innerHTML = '<table class="link-table"><thead><tr>' +
+        '<th>#</th><th>颗粒</th><th>类别</th><th>观测 A</th><th>观测 B</th><th>坐标差</th><th>复核结论</th>' +
+        '</tr></thead><tbody>' + t.links.map(function (l) {
+          var cur = openTicketState.decisions[l.index];
+          var stateText = l.decision === 'pending' ? '待复核' : (l.decision === 'confirmed' ? '已确认' : '已否决');
+          return '<tr class="link-row decision-' + esc(l.decision) + '">' +
+            '<td>' + l.index + '</td>' +
+            '<td>#' + l.particleId + '</td>' +
+            '<td>' + esc(l.category) + '</td>' +
+            '<td>' + obsText(l.a) + '</td>' +
+            '<td>' + obsText(l.b) + '</td>' +
+            '<td>Δx=' + l.dx + '<br>Δy=' + l.dy + '<br>曼哈顿=' + l.manhattan + '</td>' +
+            '<td><div class="decision-cell">' +
+              '<button type="button" class="small btn-confirm' + (cur === 'confirmed' ? ' active' : '') + '" data-action="decide" data-link="' + l.index + '" data-decision="confirmed">确认</button>' +
+              '<button type="button" class="small btn-reject' + (cur === 'rejected' ? ' active' : '') + '" data-action="decide" data-link="' + l.index + '" data-decision="rejected">否决</button>' +
+              '<span class="decision-state">' + stateText + '</span>' +
+            '</div></td>' +
+            '</tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+    if (t.status === 'verified') {
+      reviewHint.textContent = '全部关联已确认，本次颗粒计数已证实。';
+    } else if (t.status === 'needs-readjudication') {
+      reviewHint.textContent = '存在否决关联，需重新裁决；可修正结论后再次提交。';
+    }
+  }
+
+  // 逐条记录确认 / 否决（仅改本地待提交状态，提交后由服务端定论）
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest('button[data-action="decide"]');
+    if (!btn || !openTicketState) return;
+    openTicketState.decisions[Number(btn.dataset.link)] = btn.dataset.decision;
+    renderTicketDetail();
+  });
+
+  // 创建证据单：以裁决成功时的完整草稿调用服务端重新裁决并冻结
+  document.getElementById('btn-create-ticket').addEventListener('click', function () {
+    if (!lastAdjudicatedPayload) return;
+    ticketCreateHint.textContent = '创建中…';
+    fetchJson('/api/review-tickets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(lastAdjudicatedPayload),
+    })
+      .then(function (r) {
+        if (!r.res.ok) {
+          var err = (r.body && r.body.error) || {};
+          ticketCreateHint.textContent = err.message || ('创建失败（HTTP ' + r.res.status + '）');
+          return;
+        }
+        ticketCreateHint.textContent = '已创建证据单 #' + r.body.id + '（结论与来源已冻结）。';
+        loadTickets(r.body.id);
+        document.getElementById('ticket-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      })
+      .catch(function () {
+        ticketCreateHint.textContent = '网络或服务器错误，创建失败。';
+      });
+  });
+
+  document.getElementById('btn-refresh-tickets').addEventListener('click', function () {
+    loadTickets(openTicketState ? openTicketState.ticket.id : null);
+  });
+
+  ticketListEl.addEventListener('click', function (e) {
+    var item = e.target.closest('[data-ticket-id]');
+    if (item) openTicket(Number(item.dataset.ticketId));
+  });
+
+  // 提交复核结论：携带当前版本与唯一操作号；冲突时刷新为最新证据单
+  document.getElementById('btn-submit-review').addEventListener('click', function () {
+    if (!openTicketState) return;
+    var t = openTicketState.ticket;
+    var decisions = Object.keys(openTicketState.decisions)
+      .map(function (k) { return { linkIndex: Number(k), decision: openTicketState.decisions[k] }; })
+      .sort(function (a, b) { return a.linkIndex - b.linkIndex; });
+    if (decisions.length === 0) {
+      reviewHint.textContent = '请先逐条确认或否决采用关联，再提交。';
+      return;
+    }
+    var payload = { version: t.version, operationId: operationIdFor(t.id, t.version, decisions), decisions: decisions };
+    reviewHint.textContent = '提交中…';
+    fetchJson('/api/review-tickets/' + t.id + '/reviews', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+      .then(function (r) {
+        if (r.res.ok) {
+          openTicketState.ticket = r.body;
+          syncDecisionsFromTicket();
+          renderTicketDetail();
+          reviewHint.textContent = '复核已提交（版本 v' + r.body.version + '）。' +
+            (r.body.status === 'verified' ? '全部关联已确认，本次颗粒计数已证实。' : '');
+          loadTickets();
+          return;
+        }
+        var err = (r.body && r.body.error) || {};
+        if (r.res.status === 409) {
+          reviewHint.textContent = (err.message || '版本冲突') + ' 已为你刷新最新证据单。';
+          openTicket(t.id); // 过期版本 / 操作号冲突：不改变证据单，刷新后重试
+          return;
+        }
+        reviewHint.textContent = err.message || ('提交失败（HTTP ' + r.res.status + '）');
+      })
+      .catch(function () {
+        // 网络失败：操作号由内容确定，直接重试即为幂等重试
+        reviewHint.textContent = '网络或服务器错误，请直接重试（同一操作号不会产生重复记录）。';
+      });
+  });
+
+  loadTickets();
   render();
 })();

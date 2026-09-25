@@ -6,6 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { validateSubmission } from './validation.js';
 import { solveDeduplication, SolverLimitError } from './dedup.js';
+import { TicketStore, toPublic, validateReviewBody } from './tickets.js';
 
 const SRC_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(SRC_DIR, '..', 'public');
@@ -47,22 +48,28 @@ function readBody(req, limit) {
   });
 }
 
-async function handleDeduplication(req, res) {
+async function readJsonBody(req, res) {
   let raw;
   try {
     raw = await readBody(req, MAX_BODY_BYTES);
   } catch (err) {
-    return sendJson(res, err.statusCode || 400, { error: { message: err.message } });
+    sendJson(res, err.statusCode || 400, { error: { message: err.message } });
+    return { ok: false };
   }
-  let body;
   try {
-    body = JSON.parse(raw);
+    return { ok: true, body: JSON.parse(raw) };
   } catch {
-    return sendJson(res, 400, {
+    sendJson(res, 400, {
       error: { message: '请求体不是合法 JSON', issues: [{ path: '', message: 'JSON 解析失败' }] },
     });
+    return { ok: false };
   }
-  const validation = validateSubmission(body);
+}
+
+async function handleDeduplication(req, res) {
+  const parsed = await readJsonBody(req, res);
+  if (!parsed.ok) return;
+  const validation = validateSubmission(parsed.body);
   if (!validation.ok) {
     return sendJson(res, 400, {
       error: { message: '输入不合规，请根据定位信息修正后重新提交（草稿已保留）', issues: validation.issues },
@@ -77,6 +84,45 @@ async function handleDeduplication(req, res) {
     }
     throw err;
   }
+}
+
+/** 创建复测证据单：以当时完整草稿在服务端重新裁决并冻结。 */
+async function handleCreateTicket(req, res, store) {
+  const parsed = await readJsonBody(req, res);
+  if (!parsed.ok) return;
+  const validation = validateSubmission(parsed.body);
+  if (!validation.ok) {
+    return sendJson(res, 400, {
+      error: { message: '输入不合规，请根据定位信息修正后重新提交（草稿已保留）', issues: validation.issues },
+    });
+  }
+  try {
+    const ticket = await store.create(validation.value);
+    return sendJson(res, 201, toPublic(ticket));
+  } catch (err) {
+    if (err instanceof SolverLimitError) {
+      return sendJson(res, 422, { error: { message: err.message } });
+    }
+    throw err;
+  }
+}
+
+/** 提交复核结论：携带当前版本号与唯一操作号，幂等且拒绝过期版本。 */
+async function handleSubmitReview(req, res, store, id) {
+  const parsed = await readJsonBody(req, res);
+  if (!parsed.ok) return;
+  const ticket = store.get(id);
+  if (!ticket) {
+    return sendJson(res, 404, { error: { message: `证据单 #${id} 不存在` } });
+  }
+  const validation = validateReviewBody(parsed.body, ticket.links.length);
+  if (!validation.ok) {
+    return sendJson(res, 400, {
+      error: { message: '复核提交不合规，证据单未改变', issues: validation.issues },
+    });
+  }
+  const outcome = await store.applyReview(id, validation.value);
+  return sendJson(res, outcome.status, outcome.body);
 }
 
 async function serveStatic(pathname, res) {
@@ -97,7 +143,9 @@ async function serveStatic(pathname, res) {
   }
 }
 
-export function createServer() {
+export function createServer(options = {}) {
+  const dataDir = options.dataDir || process.env.DATA_DIR || path.join(SRC_DIR, '..', 'data');
+  const store = new TicketStore(dataDir);
   return http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -108,6 +156,23 @@ export function createServer() {
       }
       if (req.method === 'POST' && pathname === '/api/particle-deduplications') {
         return await handleDeduplication(req, res);
+      }
+      // 复测证据单
+      if (req.method === 'POST' && pathname === '/api/review-tickets') {
+        return await handleCreateTicket(req, res, store);
+      }
+      if (req.method === 'GET' && pathname === '/api/review-tickets') {
+        return sendJson(res, 200, { tickets: store.list() });
+      }
+      const ticketMatch = /^\/api\/review-tickets\/(\d+)$/.exec(pathname);
+      if (req.method === 'GET' && ticketMatch) {
+        const ticket = store.get(Number(ticketMatch[1]));
+        if (!ticket) return sendJson(res, 404, { error: { message: `证据单 #${ticketMatch[1]} 不存在` } });
+        return sendJson(res, 200, toPublic(ticket));
+      }
+      const reviewMatch = /^\/api\/review-tickets\/(\d+)\/reviews$/.exec(pathname);
+      if (req.method === 'POST' && reviewMatch) {
+        return await handleSubmitReview(req, res, store, Number(reviewMatch[1]));
       }
       if (req.method === 'GET' || req.method === 'HEAD') {
         return await serveStatic(pathname, res);
